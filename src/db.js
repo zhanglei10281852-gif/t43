@@ -54,10 +54,75 @@ async function initDb() {
         approve_reason VARCHAR(500),
         reject_reason VARCHAR(500),
         result TEXT,
+        start_date DATE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (applicant_id) REFERENCES applicants(id),
         FOREIGN KEY (lawyer_id) REFERENCES lawyers(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    const [caseCols] = await conn.execute("DESCRIBE cases");
+    const hasStartDate = caseCols.some((c) => c.Field === "start_date");
+    if (!hasStartDate) {
+      await conn.execute("ALTER TABLE cases ADD COLUMN start_date DATE");
+    }
+
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS subsidy_standards (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        case_type ENUM('民事','刑事','行政','劳动争议','婚姻家庭','其他') NOT NULL UNIQUE,
+        amount DECIMAL(10,2) NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    const [[stdCount]] = await conn.execute(
+      "SELECT COUNT(*) as cnt FROM subsidy_standards",
+    );
+    if (stdCount.cnt === 0) {
+      await conn.execute(`
+        INSERT INTO subsidy_standards (case_type, amount) VALUES
+        ('民事', 1500.00),
+        ('刑事', 2000.00),
+        ('行政', 1500.00),
+        ('劳动争议', 1200.00),
+        ('婚姻家庭', 1000.00),
+        ('其他', 1000.00)
+      `);
+    }
+
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS subsidy_sheets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sheet_no VARCHAR(30) NOT NULL UNIQUE,
+        case_id INT NOT NULL,
+        case_type ENUM('民事','刑事','行政','劳动争议','婚姻家庭','其他') NOT NULL,
+        lawyer_id INT NOT NULL,
+        standard_amount DECIMAL(10,2) NOT NULL,
+        is_overdue TINYINT(1) DEFAULT 0,
+        actual_amount DECIMAL(10,2) NOT NULL,
+        status ENUM('待确认','已确认','已发放') NOT NULL DEFAULT '待确认',
+        calculate_date DATE NOT NULL,
+        confirm_date DATE,
+        issue_date DATE,
+        issue_method ENUM('银行转账','现金'),
+        bank_serial_no VARCHAR(100),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (case_id) REFERENCES cases(id),
+        FOREIGN KEY (lawyer_id) REFERENCES lawyers(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS annual_budgets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        year INT NOT NULL UNIQUE,
+        total_budget DECIMAL(12,2) NOT NULL,
+        used_amount DECIMAL(12,2) DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 

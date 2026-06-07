@@ -158,34 +158,113 @@ router.put("/:id/start", async (req, res) => {
   if (!c) return res.status(404).json({ error: "案件不存在" });
   if (c.status !== "已指派")
     return res.status(400).json({ error: "只有已指派状态可以开始办理" });
-  await pool.execute("UPDATE cases SET status = ? WHERE id = ?", [
-    "办理中",
-    req.params.id,
-  ]);
+  const today = new Date().toISOString().split("T")[0];
+  await pool.execute(
+    "UPDATE cases SET status = ?, start_date = ? WHERE id = ?",
+    ["办理中", today, req.params.id],
+  );
   res.json({ message: "案件开始办理" });
 });
 
 router.put("/:id/close", async (req, res) => {
   const { result } = req.body;
   if (!result) return res.status(400).json({ error: "结案结果为必填" });
-  const [[c]] = await pool.execute(
-    "SELECT status, lawyer_id FROM cases WHERE id = ?",
-    [req.params.id],
-  );
-  if (!c) return res.status(404).json({ error: "案件不存在" });
-  if (c.status !== "办理中")
-    return res.status(400).json({ error: "只有办理中状态可以结案" });
-  await pool.execute("UPDATE cases SET status = ?, result = ? WHERE id = ?", [
-    "已结案",
-    result,
-    req.params.id,
-  ]);
-  if (c.lawyer_id) {
-    await pool.execute("UPDATE lawyers SET status = '可接案' WHERE id = ?", [
-      c.lawyer_id,
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[c]] = await conn.execute(
+      "SELECT status, lawyer_id, case_type, start_date FROM cases WHERE id = ?",
+      [req.params.id],
+    );
+    if (!c) {
+      await conn.rollback();
+      return res.status(404).json({ error: "案件不存在" });
+    }
+    if (c.status !== "办理中") {
+      await conn.rollback();
+      return res.status(400).json({ error: "只有办理中状态可以结案" });
+    }
+
+    await conn.execute("UPDATE cases SET status = ?, result = ? WHERE id = ?", [
+      "已结案",
+      result,
+      req.params.id,
     ]);
+
+    if (c.lawyer_id) {
+      await conn.execute("UPDATE lawyers SET status = '可接案' WHERE id = ?", [
+        c.lawyer_id,
+      ]);
+    }
+
+    let subsidySheet = null;
+    if (c.lawyer_id) {
+      const [[std]] = await conn.execute(
+        "SELECT amount FROM subsidy_standards WHERE case_type = ?",
+        [c.case_type],
+      );
+
+      if (std) {
+        let isOverdue = 0;
+        let actualAmount = std.amount;
+
+        if (c.start_date) {
+          const start = new Date(c.start_date);
+          const end = new Date();
+          const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+          if (diffDays > 90) {
+            isOverdue = 1;
+            actualAmount = std.amount * 1.3;
+          }
+        }
+
+        const sheetNo = generateSubsidySheetNo();
+        const today = new Date().toISOString().split("T")[0];
+
+        const [sheetResult] = await conn.execute(
+          `INSERT INTO subsidy_sheets 
+           (sheet_no, case_id, case_type, lawyer_id, standard_amount, is_overdue, actual_amount, status, calculate_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '待确认', ?)`,
+          [
+            sheetNo,
+            req.params.id,
+            c.case_type,
+            c.lawyer_id,
+            std.amount,
+            isOverdue,
+            actualAmount,
+            today,
+          ],
+        );
+
+        subsidySheet = {
+          id: sheetResult.insertId,
+          sheet_no: sheetNo,
+        };
+      }
+    }
+
+    await conn.commit();
+    res.json({
+      message: "案件已结案",
+      subsidy_sheet: subsidySheet,
+    });
+  } catch (e) {
+    await conn.rollback();
+    res.status(500).json({ error: e.message });
+  } finally {
+    conn.release();
   }
-  res.json({ message: "案件已结案" });
 });
+
+function generateSubsidySheetNo() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const r = String(Math.floor(Math.random() * 90000) + 10000);
+  return `BT${y}${m}${d}${r}`;
+}
 
 module.exports = router;
